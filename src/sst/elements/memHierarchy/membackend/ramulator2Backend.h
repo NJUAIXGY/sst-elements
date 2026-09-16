@@ -20,6 +20,7 @@
 #include "sst/elements/memHierarchy/membackend/memBackend.h"
 
 #include <deque>
+#include <fstream>
 
 #include "base/base.h"
 #include "base/request.h"
@@ -45,7 +46,10 @@ public:
             /* Own parameters */
             {"configFile",  "Name of the Ramulator2 Device config file", NULL},
             {"admission_queue_size", "(int) Local backend admission queue depth in requests. 0 keeps legacy direct-inject behavior; -1 means unbounded.", "0"},
-            {"admission_issue_budget_per_cycle", "(int) Max queued requests to attempt injecting into Ramulator2 each backend cycle. 0 or negative is unlimited.", "-1"} )
+            {"admission_issue_budget_per_cycle", "(int) Max queued requests to attempt injecting into Ramulator2 each backend cycle. 0 or negative is unlimited.", "-1"},
+            {"memory_ticks_per_sst_cycle", "(int) Number of Ramulator2 ticks executed per SST backend cycle. Must not be combined with sst_cycles_per_memory_tick > 1.", "1"},
+            {"sst_cycles_per_memory_tick", "(int) Execute one Ramulator2 tick every N SST backend cycles. Must not be combined with memory_ticks_per_sst_cycle > 1.", "1"},
+            {"trace_file", "Optional per-request Ramulator2 JSONL evidence path", ""} )
 
 /* Begin class definition */
     ramulator2Memory(ComponentId_t id, Params &params);
@@ -61,6 +65,7 @@ protected:
     // Track outstanding requests
     std::map<uint64_t, std::deque<ReqId> > dramReqs;
     std::set<ReqId> writes;
+    std::map<ReqId, Addr> write_addrs;
 
 private:
     struct PendingReq {
@@ -75,7 +80,15 @@ private:
     bool admission_queue_enable_;
     int64_t admission_queue_size_;
     int32_t admission_issue_budget_per_cycle_;
+    int32_t memory_ticks_per_sst_cycle_;
+    int32_t sst_cycles_per_memory_tick_;
+    int32_t sst_cycle_phase_;
     std::deque<PendingReq> admission_queue_;
+    std::string trace_file_;
+    std::ofstream trace_stream_;
+    std::uint64_t trace_cycle_ = 0;
+    void traceEvent_(const char* phase, ReqId id, Addr addr, bool isWrite,
+                     bool accepted, const Ramulator::Request* request = nullptr);
 };
 
 }
