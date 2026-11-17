@@ -62,7 +62,8 @@ public:
             {"backing_in_file",     "(string) An optional file to pre-load memory contents from.", ""},\
             {"backing_out_file",    "(string) An optional file to write out memory contents to. Setting this will also trigger a flush of cache contents prior to writing the file. May be the same as 'backing_in_file'.", ""},\
             {"backing_out_screen",  "(bool) Write out memory contents to screen at end of simulation. Setting this will also trigger a flush of cache contents prior to writing to screen.", "false"},\
-            {"customCmdMemHandler", "(string) Name of the custom command handler to load", ""}
+            {"customCmdMemHandler", "(string) Name of the custom command handler to load", ""},\
+            {"transaction_slots",   "(uint) Storage-M5: max original external transactions resident in this controller; 0 disables the controller-admission protocol", "0"}
 
     SST_ELI_DOCUMENT_PARAMS( MEMCONTROLLER_ELI_PARAMS )
 
@@ -72,9 +73,14 @@ public:
             {"network_ack", "DEPRECATED: Set 'highlink' subcomponent slot to memHierarchy.MemNICFour instead. For split networks, ack/response network connection to a cache/directory controller", {"memHierarchy.MemRtrEvent"} },\
             {"network_fwd", "DEPRECATED: Set 'highlink' subcomponent slot to memHierarchy.MemNICFour instead. For split networks, forward request network connection to a cache/directory controller", {"memHierarchy.MemRtrEvent"} },\
             {"network_data","DEPRECATED: Set 'highlink' subcomponent slot to memHierarchy.MemNICFour instead. For split networks, data network connection to a cache/directory controller", {"memHierarchy.MemRtrEvent"} },\
-            {"cube_link",   "DEPRECATED. Use named subcomponents and their links instead.", {"sst.Event"} }
+            {"cube_link",   "DEPRECATED. Use named subcomponents and their links instead.", {"sst.Event"} },\
+            {"admission_credit", "Storage-M5 controller transaction-slot grant/return sideband toward the request fabric", {"memHierarchy.MemFlowCredit"} }
 
     SST_ELI_DOCUMENT_PORTS( MEMCONTROLLER_ELI_PORTS )
+
+    SST_ELI_DOCUMENT_STATISTICS(
+        {"transaction_slots_occupied_peak", "Peak original external transactions resident in the controller", "slots", 1},
+        {"transaction_slot_returns",        "External transaction slots retired and returned to the fabric", "slots", 1})
 
 
 #define MEMCONTROLLER_ELI_SUBCOMPONENTSLOTS {"backend", "Backend memory model to use for timing. Defaults to simpleMem", "SST::MemHierarchy::MemBackend"},\
@@ -183,10 +189,35 @@ private:
 
     /* Storage-M4: ready responses waiting for fabric ingress admission.
      * The controller keeps the original event until link_->trySend accepts;
-     * the queue itself is a send-side wait state, not a bounded DRAM buffer. */
-    std::deque<MemEventBase*> pendingResponses_;
-    void emitOrQueueResponse(MemEventBase* resp);
+     * the queue itself is a send-side wait state, not a bounded DRAM buffer.
+     * Storage-M5: each entry records which admitted external transaction it
+     * belongs to so the slot retires exactly when the response is handed off. */
+    struct PendingResponse {
+        MemEventBase* event = nullptr;
+        SST::Event::id_type owner;
+        void serialize_order(SST::Core::Serialization::serializer& ser) {
+            SST_SER(event);
+            SST_SER(owner);
+        }
+    };
+    std::deque<PendingResponse> pendingResponses_;
+    void emitOrQueueResponse(MemEventBase* resp, SST::Event::id_type owner);
     void drainPendingResponses();
+
+    /* Storage-M5: bounded external transaction residency.  One admitted
+     * external event consumes exactly one slot from admit (handleEvent
+     * entry) until its required response is accepted by the M4 credit link
+     * or its no-response work completes; controller-internal children
+     * (Flush-derived PutM) never carry a slot. */
+    bool admissionEnabled_ = false;
+    uint64_t transactionSlots_ = 0;
+    uint64_t transactionSlotsPeak_ = 0;
+    std::set<SST::Event::id_type> admittedTxns_;
+    SST::Link* admissionCreditLink_ = nullptr;
+    Statistic<uint64_t>* statSlotsOccupiedPeak_ = nullptr;
+    Statistic<uint64_t>* statSlotReturns_ = nullptr;
+    void admitExternalTransaction(SST::Event::id_type id);
+    void retireExternalSlot(SST::Event::id_type id);
 
     void handleCustomEvent(MemEventBase* ev);
 

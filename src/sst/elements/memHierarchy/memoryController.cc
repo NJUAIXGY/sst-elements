@@ -25,6 +25,7 @@
 #include "memEventBase.h"
 #include "memEvent.h"
 #include "memEventCustom.h"
+#include "memFlowCredit.h"
 #include "cacheListener.h"
 #include "memNIC.h"
 #include "memLink.h"
@@ -364,6 +365,24 @@ MemController::MemController(ComponentId_t id, Params &params) : Component(id), 
                     std::bind(static_cast<void(MemController::*)(Addr,std::vector<uint8_t>*)>(&MemController::writeData), this, _1, _2));
         }
     }
+
+    /* Storage-M5: bounded external transaction residency.  A positive
+     * 'transaction_slots' enables the admission-credit protocol; the
+     * connected fabric consumes InitialGrant during init and receives one
+     * ReturnCredit per retired external transaction. */
+    transactionSlots_ = params.find<uint64_t>("transaction_slots", 0);
+    admissionEnabled_ = transactionSlots_ > 0;
+    if (admissionEnabled_) {
+        admissionCreditLink_ = configureLink("admission_credit");
+        if (!admissionCreditLink_) {
+            out.fatal(CALL_INFO, -1,
+                "%s, ERROR: 'transaction_slots' > 0 requires a connected"
+                " 'admission_credit' port toward the chip memory fabric\n",
+                getName().c_str());
+        }
+    }
+    statSlotsOccupiedPeak_ = registerStatistic<uint64_t>("transaction_slots_occupied_peak");
+    statSlotReturns_ = registerStatistic<uint64_t>("transaction_slot_returns");
 }
 
 void MemController::handleEvent(SST::Event* event) {
@@ -376,6 +395,15 @@ void MemController::handleEvent(SST::Event* event) {
     if (mem_h_is_debug_event(meb)) {
         mem_h_debug_output(_L3_, "E: %-20" PRIu64 " %-20" PRIu64 " %-20s Event:New     (%s)\n",
                     getCurrentSimCycle(), getNextClockCycle(clockTimeBase_) - 1, getName().c_str(), meb->getVerboseString(dlevel).c_str());
+    }
+
+    /* Storage-M5: register residency BEFORE the command dispatch — the
+     * convertor can synchronously complete a zero-work transaction inside
+     * this call stack, so the slot must already exist.  The fabric spent
+     * one of its granted credits to send this event; overflow means the
+     * fabric violated the admission protocol. */
+    if (admissionEnabled_) {
+        admitExternalTransaction(meb->getID());
     }
 
     Command cmd = meb->getCmd();
@@ -479,33 +507,70 @@ void MemController::handleEvent(SST::Event* event) {
                     mem_h_debug_output(_L4_, "E: %-20" PRIu64 " %-20" PRIu64 " %-20s Event:Send    (%s)\n",
                         getCurrentSimCycle(), getNextClockCycle(clockTimeBase_) - 1, getName().c_str(), resp->getVerboseString(dlevel).c_str());
                 }
-                emitOrQueueResponse( resp );
+                emitOrQueueResponse( resp, ev->getID() );
                 delete ev;
             }
             break;
 
         case Command::PutS:
         case Command::PutE:
-            delete ev;
+            {
+                /* Storage-M5: local-immediate command — no backend work and
+                 * no response, so its slot retires right after handling. */
+                SST::Event::id_type id = ev->getID();
+                delete ev;
+                retireExternalSlot(id);
+            }
             break;
         default:
             out.fatal(CALL_INFO,-1,"Memory controller received unrecognized command: %s", CommandString[(int)cmd]);
     }
 }
 
-void MemController::emitOrQueueResponse(MemEventBase* resp) {
+void MemController::emitOrQueueResponse(MemEventBase* resp, SST::Event::id_type owner) {
     /* Storage-M4: responses queue here when the credit-controlled link has
      * no ingress capacity; ownership stays with the controller until the
      * port accepts.  Queue order preserves readiness order. */
-    pendingResponses_.push_back(resp);
+    pendingResponses_.push_back({resp, owner});
     drainPendingResponses();
 }
 
 void MemController::drainPendingResponses() {
     while (!pendingResponses_.empty()) {
-        if (!link_->trySend(pendingResponses_.front())) break;
+        PendingResponse& head = pendingResponses_.front();
+        if (!link_->trySend(head.event)) break;
+        /* Storage-M5: the external transaction's slot ends only when its
+         * response has actually been accepted by the fabric ingress. */
+        retireExternalSlot(head.owner);
         pendingResponses_.pop_front();
     }
+}
+
+void MemController::admitExternalTransaction(SST::Event::id_type id) {
+    admittedTxns_.insert(id);
+    if (admittedTxns_.size() > transactionSlots_) {
+        dbg.fatal(CALL_INFO, -1,
+            "%s, ERROR: external transaction residency overflow (%zu admitted"
+            " > %" PRIu64 " slots) — the fabric issued more requests than it"
+            " was granted credits\n", getName().c_str(), admittedTxns_.size(),
+            transactionSlots_);
+    }
+    if (admittedTxns_.size() > transactionSlotsPeak_) {
+        transactionSlotsPeak_ = admittedTxns_.size();
+        statSlotsOccupiedPeak_->addData(transactionSlotsPeak_);
+    }
+}
+
+void MemController::retireExternalSlot(SST::Event::id_type id) {
+    if (!admissionEnabled_) return;
+    /* Controller-internal children (e.g. the PutM derived from FlushLine)
+     * complete through the same paths but own no external slot. */
+    auto it = admittedTxns_.find(id);
+    if (it == admittedTxns_.end()) return;
+    admittedTxns_.erase(it);
+    statSlotReturns_->addData(1);
+    admissionCreditLink_->send(
+        new MemFlowCredit(MemFlowCreditKind::ReturnCredit, 1));
 }
 
 bool MemController::clock(Cycle_t cycle) {
@@ -572,9 +637,15 @@ void MemController::handleMemResponse( Event::id_type id, uint32_t flags ) {
     /* Handle custom events */
     if (evb->getCmd() == Command::CustomReq) {
         MemEventBase * resp = customCommandHandler_->finish(evb, flags);
-        if (resp != nullptr)
-            emitOrQueueResponse(resp);
-        delete evb;
+        if (resp != nullptr) {
+            emitOrQueueResponse(resp, evb->getID());
+            delete evb;
+        } else {
+            /* Storage-M5: a custom transaction that yields no response is
+             * complete at this callback — retire its slot now. */
+            delete evb;
+            retireExternalSlot(id);
+        }
         return;
     }
 
@@ -588,7 +659,11 @@ void MemController::handleMemResponse( Event::id_type id, uint32_t flags ) {
         writeData(ev);
 
     if (ev->queryFlag(MemEvent::F_NORESPONSE)) {
+        /* Storage-M5: no-response transactions retire at backend-reported
+         * completion.  External PutM owns a slot; a Flush-derived internal
+         * PutM is not in admittedTxns_ and retires nothing. */
         delete ev;
+        retireExternalSlot(id);
         return;
     }
 
@@ -612,12 +687,20 @@ void MemController::handleMemResponse( Event::id_type id, uint32_t flags ) {
                 getCurrentSimCycle(), getNextClockCycle(clockTimeBase_) - 1, getName().c_str(), resp->getVerboseString(dlevel).c_str());
     }
 
-    emitOrQueueResponse( resp );
+    emitOrQueueResponse( resp, id );
     delete ev;
 }
 
 void MemController::init(unsigned int phase) {
     link_->init(phase);
+
+    /* Storage-M5: publish the whole transaction-slot budget exactly once.
+     * The chip fabric spends these grants to send original external
+     * events; retirement returns them through the same sideband. */
+    if (admissionEnabled_ && phase == 0) {
+        admissionCreditLink_->sendUntimedData(
+            new MemFlowCredit(MemFlowCreditKind::InitialGrant, transactionSlots_));
+    }
 
     region_ = link_->getRegion(); // This can change during init, but should stabilize before we start receiving init data
 
@@ -951,4 +1034,10 @@ void MemController::serialize_order(SST::Core::Serialization::serializer& ser) {
 
     SST_SER(outstandingEvents_);
     SST_SER(pendingResponses_);
+
+    SST_SER(admissionEnabled_);
+    SST_SER(transactionSlots_);
+    SST_SER(transactionSlotsPeak_);
+    SST_SER(admittedTxns_);
+    SST_SER(admissionCreditLink_);
 }
