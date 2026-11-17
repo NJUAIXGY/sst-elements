@@ -373,19 +373,26 @@ bool CoherenceController::sendOutgoingEvents() {
             if (bytesLeft == 0) break;
             if (bytesLeft >= outgoingEventQueueDown_.front().size) {
                 bytesLeft -= outgoingEventQueueDown_.front().size;  // Send this many bytes
+                outgoingEventQueueDown_.front().size = 0;
             } else {
                 outgoingEventQueueDown_.front().size -= bytesLeft;
                 break;
             }
+        } else {
+            outgoingEventQueueDown_.front().size = 0;
         }
 
+
+        // Storage-M4: a credit-controlled port may refuse admission; the
+        // entry stays queued (with size already consumed = local byte
+        // service complete) and retires only once the port accepts.
+        if (!linkDown_->trySend(outgoingEvent)) break;
 
         if (mem_h_is_debug_event(outgoingEvent)) {
             debug->debug(_L4_, "E: %-20" PRIu64 " %-20" PRIu64 " %-20s Event:Send    (%s)\n",
                     getCurrentSimCycle(), timestamp_, cachename_.c_str(), outgoingEvent->getBriefString().c_str());
         }
 
-        linkDown_->send(outgoingEvent);
         outgoingEventQueueDown_.pop_front();
 
     }
@@ -398,11 +405,18 @@ bool CoherenceController::sendOutgoingEvents() {
             if (bytesLeft == 0) break;
             if (bytesLeft >= outgoingEventQueueUp_.front().size) {
                 bytesLeft -= outgoingEventQueueUp_.front().size;
+                outgoingEventQueueUp_.front().size = 0;
             } else {
                 outgoingEventQueueUp_.front().size -= bytesLeft;
                 break;
             }
+        } else {
+            outgoingEventQueueUp_.front().size = 0;
         }
+
+        // Storage-M4: only attempt admission once the local Cache port has
+        // fully serviced this message; trySend(false) leaves it queued.
+        if (!linkUp_->trySend(outgoingEvent)) break;
 
         if (mem_h_is_debug_event(outgoingEvent)) {
             debug->debug(_L4_, "E: %-20" PRIu64 " %-20" PRIu64 " %-20s Event:Send    (%s)\n",
@@ -415,7 +429,6 @@ bool CoherenceController::sendOutgoingEvents() {
             startTimes_.erase(outgoingEvent->getResponseToID());
         }
 
-        linkUp_->send(outgoingEvent);
         outgoingEventQueueUp_.pop_front();
     }
 

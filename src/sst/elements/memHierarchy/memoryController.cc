@@ -479,7 +479,7 @@ void MemController::handleEvent(SST::Event* event) {
                     mem_h_debug_output(_L4_, "E: %-20" PRIu64 " %-20" PRIu64 " %-20s Event:Send    (%s)\n",
                         getCurrentSimCycle(), getNextClockCycle(clockTimeBase_) - 1, getName().c_str(), resp->getVerboseString(dlevel).c_str());
                 }
-                link_->send( resp );
+                emitOrQueueResponse( resp );
                 delete ev;
             }
             break;
@@ -493,15 +493,32 @@ void MemController::handleEvent(SST::Event* event) {
     }
 }
 
+void MemController::emitOrQueueResponse(MemEventBase* resp) {
+    /* Storage-M4: responses queue here when the credit-controlled link has
+     * no ingress capacity; ownership stays with the controller until the
+     * port accepts.  Queue order preserves readiness order. */
+    pendingResponses_.push_back(resp);
+    drainPendingResponses();
+}
+
+void MemController::drainPendingResponses() {
+    while (!pendingResponses_.empty()) {
+        if (!link_->trySend(pendingResponses_.front())) break;
+        pendingResponses_.pop_front();
+    }
+}
+
 bool MemController::clock(Cycle_t cycle) {
     bool unclockLink = true;
     if (clockLink_) {
         unclockLink = link_->clock();
     }
 
+    drainPendingResponses();
+
     bool unclockBack = memBackendConvertor_->clock( cycle );
 
-    if (unclockLink && unclockBack) {
+    if (unclockLink && unclockBack && pendingResponses_.empty()) {
         memBackendConvertor_->turnClockOff();
         clockOn_ = false;
         return true;
@@ -556,7 +573,7 @@ void MemController::handleMemResponse( Event::id_type id, uint32_t flags ) {
     if (evb->getCmd() == Command::CustomReq) {
         MemEventBase * resp = customCommandHandler_->finish(evb, flags);
         if (resp != nullptr)
-            link_->send(resp);
+            emitOrQueueResponse(resp);
         delete evb;
         return;
     }
@@ -595,7 +612,7 @@ void MemController::handleMemResponse( Event::id_type id, uint32_t flags ) {
                 getCurrentSimCycle(), getNextClockCycle(clockTimeBase_) - 1, getName().c_str(), resp->getVerboseString(dlevel).c_str());
     }
 
-    link_->send( resp );
+    emitOrQueueResponse( resp );
     delete ev;
 }
 
@@ -933,4 +950,5 @@ void MemController::serialize_order(SST::Core::Serialization::serializer& ser) {
     SST_SER(customCommandHandler_);
 
     SST_SER(outstandingEvents_);
+    SST_SER(pendingResponses_);
 }

@@ -63,9 +63,12 @@ libmemHierarchy_la_SOURCES = \
 	memEventCustom.h \
 	moveEvent.h \
 	memLinkBase.h \
+	memFlowCredit.h \
 	memNICBase.h \
 	memLink.h \
 	memLink.cc \
+	creditMemLinkV5.h \
+	creditMemLinkV5.cc \
 	memNIC.h \
 	memNIC.cc \
 	memNICFour.h \
@@ -399,6 +402,8 @@ nobase_sst_HEADERS = \
 	memNICFour.h \
 	memLink.h \
 	memLinkBase.h \
+	memFlowCredit.h \
+	creditMemLinkV5.h \
 	customcmd/customCmdMemory.h \
 	membackend/backing.h \
 	membackend/memBackend.h \

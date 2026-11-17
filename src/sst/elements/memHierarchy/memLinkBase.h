@@ -161,6 +161,19 @@ public:
     virtual void send(MemEventBase * ev) =0;
 
     /*
+     * Optional admission-controlled send (Storage-M4 credit flow control).
+     * Returns true when the port accepted the event — ownership transfers and
+     * the caller must not touch the pointer again.  Returns false when the
+     * port lacks ingress capacity: the caller keeps the same event and may
+     * retry later.  The default implementation preserves the historic
+     * send-and-forget semantics for links without admission control.
+     */
+    virtual bool trySend(MemEventBase * ev) {
+        send(ev);
+        return true;
+    }
+
+    /*
      * Extra functions for MemLink derivatives
      */
     virtual bool clock() { return true; } // No clock

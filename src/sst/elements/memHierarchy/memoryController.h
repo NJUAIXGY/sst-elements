@@ -16,6 +16,8 @@
 #ifndef MEMHIERARCHY_MEMORYCONTROLLER_H
 #define MEMHIERARCHY_MEMORYCONTROLLER_H
 
+#include <deque>
+
 #include <sst/core/sst_types.h>
 
 #include <sst/core/component.h>
@@ -178,6 +180,13 @@ protected:
 private:
 
     std::map<SST::Event::id_type, MemEventBase*> outstandingEvents_; // For sending responses. Expect backend to respond to ALL requests so that we know the execution order
+
+    /* Storage-M4: ready responses waiting for fabric ingress admission.
+     * The controller keeps the original event until link_->trySend accepts;
+     * the queue itself is a send-side wait state, not a bounded DRAM buffer. */
+    std::deque<MemEventBase*> pendingResponses_;
+    void emitOrQueueResponse(MemEventBase* resp);
+    void drainPendingResponses();
 
     void handleCustomEvent(MemEventBase* ev);
 
