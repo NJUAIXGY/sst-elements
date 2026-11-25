@@ -6,16 +6,16 @@
 // or transaction identity — only capacity bookkeeping units for the
 // point-to-point credit link it travels on.
 //
-// memFlowCreditsForPayload is the ONE buffer-occupancy formula shared by
-// the sender (trySend) and the fabric (receive accounting): keeping it in
-// this shared header prevents the two sides from drifting into different
-// rounding rules (design section 17).
+// The accounting unit is one fixed Message Slot: a complete store-and-forward
+// message occupies exactly one ingress entry independent of its payload size.
+// Keeping the unit here prevents sender and fabric from drifting into different
+// capacity interpretations.  Payload bytes still determine serialization time
+// on the fabric lane; they do not subdivide or multiply buffer occupancy.
 
 #ifndef _MEMHIERARCHY_MEMFLOWCREDIT_H_
 #define _MEMHIERARCHY_MEMFLOWCREDIT_H_
 
 #include <cstdint>
-#include <algorithm>
 
 #include <sst/core/event.h>
 #include <sst/core/serialization/serialize.h>
@@ -50,15 +50,8 @@ private:
     ImplementSerializable(SST::MemHierarchy::MemFlowCredit)
 };
 
-/* Buffer-space credits a whole message reserves:
- *   K(e) = max(1, ceil((descriptor_bytes + getPayloadSize()) / granularity))
- * Store-and-forward admission — never half a message. */
-inline uint64_t memFlowCreditsForPayload(uint64_t descriptorBytes,
-                                         uint64_t payloadBytes,
-                                         uint64_t granularityBytes) {
-    const uint64_t total = descriptorBytes + payloadBytes;
-    return std::max<uint64_t>(1, (total + granularityBytes - 1) / granularityBytes);
-}
+/* One complete message reserves one Message Slot. */
+inline constexpr uint64_t memFlowMessageSlots() { return 1; }
 
 } //namespace MemHierarchy
 } //namespace SST

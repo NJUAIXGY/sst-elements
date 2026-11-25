@@ -4,7 +4,7 @@
 // The remote fabric ingress grants an initial credit budget during SST
 // init (MemFlowCredit::InitialGrant) and returns units after it actually
 // forwards a message (MemFlowCredit::ReturnCredit).  trySend() reserves
-// whole-message credits before handing the ORIGINAL event to the data
+// one message-slot credit before handing the ORIGINAL event to the data
 // link; when credits are insufficient it returns false and the caller
 // keeps the event — no fabricated NACK, no loss, no reordering.
 
@@ -24,9 +24,7 @@ public:
     SST_ELI_REGISTER_SUBCOMPONENT(CreditMemLinkV5, "memHierarchy", "CreditMemLinkV5", SST_ELI_ELEMENT_VERSION(1,0,0),
             "Credit-gated memory link for bounded fabric ingress (Storage-M4)", SST::MemHierarchy::MemLinkBase)
 
-#define CREDITMEMLINKV5_ELI_PARAMS MEMLINK_ELI_PARAMS, \
-    { "descriptor_bytes",         "(uint) Buffer descriptor bytes charged per message on this port", "16"},\
-    { "credit_granularity_bytes", "(uint) Fabric buffer bytes represented by one credit", "16"}
+#define CREDITMEMLINKV5_ELI_PARAMS MEMLINK_ELI_PARAMS
 
     SST_ELI_DOCUMENT_PARAMS( { CREDITMEMLINKV5_ELI_PARAMS } )
 
@@ -62,9 +60,6 @@ private:
     void consumeUntimedCredits();
 
     SST::Link* creditLink_ = nullptr;
-
-    uint64_t descriptorBytes_  = 16;
-    uint64_t granularityBytes_ = 16;
 
     uint64_t granted_    = 0;   // locally available send permission
     uint64_t capacity_   = 0;   // ingress budget learned via InitialGrant

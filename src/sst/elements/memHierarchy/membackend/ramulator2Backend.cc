@@ -41,11 +41,6 @@ ramulator2Memory::ramulator2Memory(ComponentId_t id, Params &params) :
     ramulator2_frontend->connect_memory_system(ramulator2_memorysystem);
     ramulator2_memorysystem->connect_frontend(ramulator2_frontend);
 
-    int32_t admission_queue_size = params.find<int32_t>("admission_queue_size", 0);
-    admission_queue_size_ = static_cast<int64_t>(admission_queue_size);
-    if (admission_queue_size_ < 0) admission_queue_size_ = -1;
-    admission_issue_budget_per_cycle_ = params.find<int32_t>("admission_issue_budget_per_cycle", -1);
-    if (admission_issue_budget_per_cycle_ == 0) admission_issue_budget_per_cycle_ = -1;
     memory_ticks_per_sst_cycle_ = params.find<int32_t>("memory_ticks_per_sst_cycle", 1);
     sst_cycles_per_memory_tick_ = params.find<int32_t>("sst_cycles_per_memory_tick", 1);
     if (memory_ticks_per_sst_cycle_ < 1 || sst_cycles_per_memory_tick_ < 1) {
@@ -58,7 +53,6 @@ ramulator2Memory::ramulator2Memory(ComponentId_t id, Params &params) :
             "Ramulator2 clock controls cannot both be greater than one\n");
     }
     sst_cycle_phase_ = 0;
-    admission_queue_enable_ = (admission_queue_size_ != 0);
     trace_file_ = params.find<std::string>("trace_file", "");
     if (!trace_file_.empty()) {
         trace_stream_.open(trace_file_, std::ios::out | std::ios::trunc);
@@ -66,9 +60,6 @@ ramulator2Memory::ramulator2Memory(ComponentId_t id, Params &params) :
     }
 
     output->output(CALL_INFO, "Instantiated Ramulator2 from config file %s\n", config_path);
-    output->verbose(CALL_INFO, 1, 0,
-        "[ramu2] admission_queue enable=%d size=%" PRId64 " issue_budget_per_cycle=%" PRId32 "\n",
-        admission_queue_enable_ ? 1 : 0, admission_queue_size_, admission_issue_budget_per_cycle_);
     output->verbose(CALL_INFO, 1, 0,
         "[ramu2] clock ratio memory_ticks_per_sst_cycle=%" PRId32 " sst_cycles_per_memory_tick=%" PRId32 "\n",
         memory_ticks_per_sst_cycle_, sst_cycles_per_memory_tick_);
@@ -118,52 +109,22 @@ bool ramulator2Memory::issueToRamulator_(const PendingReq& req){
         }
     }
     output->verbose(CALL_INFO, 1, 0,
-        "[ramu2] backend enqueue %s (dramReqMap=%zu writes=%zu admissionQ=%zu)\n",
-        enqueue_success ? "successful" : "unsuccessful", dramReqs.size(), writes.size(), admission_queue_.size());
+        "[ramu2] backend enqueue %s (dramReqMap=%zu writes=%zu)\n",
+        enqueue_success ? "successful" : "unsuccessful", dramReqs.size(), writes.size());
 
     traceEvent_("admit", req.reqId, req.addr, req.isWrite, enqueue_success);
     return enqueue_success;
 }
 
 bool ramulator2Memory::issueRequest(ReqId reqId, Addr addr, bool isWrite, unsigned numBytes){
-    PendingReq req{reqId, addr, isWrite, numBytes};
-    if (!admission_queue_enable_) {
-        return issueToRamulator_(req);
-    }
-
-    if (admission_queue_size_ >= 0 && admission_queue_.size() >= static_cast<size_t>(admission_queue_size_)) {
-        output->verbose(CALL_INFO, 1, 0,
-            "[ramu2] admission queue full, reject id=%" PRIu64 " size=%zu cap=%" PRId64 "\n",
-            (uint64_t)reqId, admission_queue_.size(), admission_queue_size_);
-        return false;
-    }
-
-    admission_queue_.push_back(req);
-    output->verbose(CALL_INFO, 2, 0,
-        "[ramu2] admission enqueue ok id=%" PRIu64 " qsize=%zu\n",
-        (uint64_t)reqId, admission_queue_.size());
-    return true;
+    return issueToRamulator_(PendingReq{reqId, addr, isWrite, numBytes});
 }
 
 bool ramulator2Memory::clock(Cycle_t cycle){
     trace_cycle_ = static_cast<std::uint64_t>(cycle);
     output->verbose(CALL_INFO, 2, 0,
-        "[ramu2] clock cycle=%" PRIu64 " pending_reads=%zu pending_writes=%zu admission_q=%zu\n",
-        (uint64_t)cycle, dramReqs.size(), writes.size(), admission_queue_.size());
-
-    int issued_this_cycle = 0;
-    while (admission_queue_enable_ && !admission_queue_.empty()) {
-        if (admission_issue_budget_per_cycle_ > 0 &&
-            issued_this_cycle >= admission_issue_budget_per_cycle_) {
-            break;
-        }
-        const PendingReq& req = admission_queue_.front();
-        if (!issueToRamulator_(req)) {
-            break;
-        }
-        admission_queue_.pop_front();
-        issued_this_cycle++;
-    }
+        "[ramu2] clock cycle=%" PRIu64 " pending_reads=%zu pending_writes=%zu\n",
+        (uint64_t)cycle, dramReqs.size(), writes.size());
 
     bool tick_memory = true;
     if (sst_cycles_per_memory_tick_ > 1) {

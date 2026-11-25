@@ -9,12 +9,6 @@ using namespace SST::MemHierarchy;
 CreditMemLinkV5::CreditMemLinkV5(ComponentId_t id, Params &params, TimeConverter* tc)
     : MemLink(id, params, tc) {
 
-    descriptorBytes_  = params.find<uint64_t>("descriptor_bytes", 16);
-    granularityBytes_ = params.find<uint64_t>("credit_granularity_bytes", 16);
-    if (granularityBytes_ == 0) {
-        dbg.fatal(CALL_INFO, -1, "%s: 'credit_granularity_bytes' must be positive\n", getName().c_str());
-    }
-
     creditLink_ = configureLink(
         "credit", new Event::Handler2<CreditMemLinkV5, &CreditMemLinkV5::handleCreditEvent>(this));
     if (!creditLink_) {
@@ -82,8 +76,7 @@ bool CreditMemLinkV5::trySend(MemEventBase* ev) {
             " publish ingress capacity (wiring or flow_control mismatch)\n",
             getName().c_str());
     }
-    const uint64_t k = memFlowCreditsForPayload(
-        descriptorBytes_, ev->getPayloadSize(), granularityBytes_);
+    const uint64_t k = memFlowMessageSlots();
 
     if (k > capacity_) {
         dbg.fatal(CALL_INFO, -1,
@@ -113,8 +106,6 @@ void CreditMemLinkV5::send(MemEventBase* ev) {
 void CreditMemLinkV5::serialize_order(SST::Core::Serialization::serializer& ser) {
     MemLink::serialize_order(ser);
     SST_SER(creditLink_);
-    SST_SER(descriptorBytes_);
-    SST_SER(granularityBytes_);
     SST_SER(granted_);
     SST_SER(capacity_);
     SST_SER(grantSeen_);
